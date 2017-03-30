@@ -41,6 +41,16 @@ def _get_current_user():
     user = models.User.objects.get(username=current_user.username)
     return user
 
+def _get_request_args(**kwargs):
+    args = dict(request.args)
+    for key, value in args.items():
+        if key in kwargs:
+            converter = kwargs[key]
+            if isinstance(value, list):
+                args[key] = [converter(item) for item in value]
+            else:
+                args[key] = converter(value)
+    return args
 
 @app.route('/login/google')
 def login_google():
@@ -153,35 +163,33 @@ def register():
         user.to_dict()
         )
 
-@app.route('/api/tasks', methods=['GET'])
+@app.route('/api/listtasks/<string:status>', methods=['GET'])
 @login_required
-def list_tasks():
-    tasks = models.Task.objects.order_by('-due_time')
-    print(tasks)
-
-    cur_status = dict(request.args)['status']
-    print(cur_status)
-    if cur_status:
-        tasks = tasks.filter(status=cur_status)
+def list_tasks(status):
+    if status == "all":
+        tasks = models.Task.objects.order_by('-due_time')
+    else:
+        tasks = models.Task.objects.filter(status=status)
 
     tasks_dict = {}
     for task in tasks:
-        tasks_dict.update(task.to_dict())
+        tasks_dict.update({task.title: task.to_dict()})
 
     return utils.make_json_response(
         200,
         tasks_dict
         )
 
+
 @app.route('/api/tasks/<string:tasktitle>', methods=['GET'])
 @login_required
 def get_task(tasktitle):
-    task = models.Task.objects.get(title=tasktitle)
-    if task is None:
+    try:
+        task = models.Task.objects.get(title=tasktitle)
+    except models.Task.DoesNotExist:
         raise exception_handler.ItemNotFound(
             "task %s not exist" % tasktitle
             )
-
     return utils.make_json_response(
         200,
         task.to_dict()
@@ -197,8 +205,10 @@ def create_task():
     task.title = data['title']
     task.content = data['content']
     task.manager = models.User.objects.get(username=data['manager'])
+
     for assign in data['assignee']:
         task.assignee.append(models.User.objects.get(username=assign))
+
     task.status = data['status']
     task.tags = data['tags']
     task.due_time = datetime.datetime.strptime(data['due_time'], '%b %d %Y %I:%M%p')
@@ -223,26 +233,37 @@ def create_task():
 def update_task(tasktitle):
     data = utils.get_request_data()
 
-    task = models.Task.objects.get(title=tasktitle)
-    if data['title']:
+    try:
+        task = models.Task.objects.get(title=tasktitle)
+    except models.Task.DoesNotExist:
+        raise exception_handler.BadRequest(
+            'task %s not exist' % tasktitle
+            )
+    print(data['content'])
+    if data.get('title'):
+        print(task.content)
         task.title = data['title']
-    if data['content']:
+
+    if data.get('content'):
         task.content = data['content']
-    if data['status']:
-        if data['status'] in ['todo', 'ongoing'] and datetime.now() > task.due_time:
-            raise exception_handler.BadRequest(
-                'due time %s already passed' % data['due_time']
+    if data.get('status') and data['status'] in ['todo', 'ongoing'] and datetime.datetime.now() > task.due_time:
+        raise exception_handler.BadRequest(
+            'due time %s already passed' % task.due_time
+            )
+    if data.get('status') and data['status'] == 'overdue' and datetime.datetime.now() < task.due_time:
+        left_days, left_hours, left_minutes = utils.shifttimedelta(task.due_time - datetime.datetime.now())
+        raise exception_handler.BadRequest(
+            'still %s days %s hours %s minutes left' % (
+                    left_days, left_hours, left_minutes
                 )
-        if data['status'] == 'overdue' and datetime.now() < task.due_time:
-            left_days, left_hours, left_minutes = utils.shifttimedelta(timedelta(data['due_time'] - datetime.now()))
-            raise exception_handler.BadRequest(
-                'still %s days %s hours %s minutes left' % (
-                        left_days, left_hours, left_minutes
-                    )
-                )
-    if data['tags']:
+            )
+    if data.get('status'):
+        task.status = data['status']
+    if data.get('tags'):
         task.tags = data['tags']
-    task.update_time = datetime.now()
+    if data.get('due_time'):
+        task.due_time = datetime.datetime.strptime(data['due_time'], '%b %d %Y %I:%M%p')
+    task.update_time = datetime.datetime.now()
     task.save()
     return utils.make_json_response(
         200,
@@ -250,20 +271,18 @@ def update_task(tasktitle):
         )
 
 
-
-@app.route('/api/tasks/<string:username>', methods=['GET'])
+@app.route('/api/usertasks/<string:username>/<string:status>', methods=['GET'])
 @login_required
-def get_user_tasks(username):
-    tasks = models.Task.objects.all()
+def get_user_tasks(username, status):
+    if status == "all":
+        tasks = models.Task.objects.order_by('-due_time')
+    else:
+        tasks = models.Task.objects.filter(status=status).order_by('-due_time')
 
-    cur_status = request.args.get('status')
-    if cur_status:
-        tasks = tasks.filter(status=cur_status)
-
-    user_task_dict = []
+    user_task_dict = {}
     for task in tasks:
         if username in [user.username for user in task.assignee] or username == task.manager.username:
-            user_task_dict.update(task.to_dict())
+            user_task_dict.update({task.title: task.to_dict()})
 
     return utils.make_json_response(
         200,
@@ -274,79 +293,31 @@ def get_user_tasks(username):
 @app.route('/api/users', methods=['GET'])
 @login_required
 def get_all_users():
-    users = models.User.objects
-    output = []
+    users = models.User.objects.all()
+    users_dict = {}
     for user in users:
-        output.append(user.to_dict())
+        users_dict.update({user.username: user.to_dict()})
     return utils.make_json_response(
         200,
-        output
+        users_dict
         )
+
 
 @app.route('/api/users/<string:username>', methods=['GET'])
 @login_required
 def get_user(username):
-    user = models.User.objects.get(username=username)
-    if user is None:
-        raise exception_handler.ItemNotFound("user not found")
+    try:
+        user = models.User.objects.get(username=username)
+    except models.User.DoesNotExist:
+        raise exception_handler.BadRequest(
+            "user %s not exist" % username
+            )
+
     return utils.make_json_response(
         200,
         user.to_dict()
         )
 
 
-'''
-def login_required(func):
-    @functools.wraps(func)
-    def decorated_api(*args, **kwargs):
-        get_access_token()
-        access_token = session.get('access_token')
-        if access_token is None:
-            return redirect(url_for('login'))
-
-        from urllib2 import Request, urlopen, URLError
-        headers = {'Authorization': 'OAuth '+ access_token}
-        req = Request('https://www.googleapis.com/oauth2/v1/userinfo?alt=json',
-              None, headers)
-
-        try:
-            res = urlopen(req)
-        except URLError, e:
-            if e.code == 401:
-                session.pop('access_token', None)
-                return redirect(url_for('login'))
-            return redirect(url_for('login'))
-        current_user_email = res.read().get('email')
-        current_user = models.User.objects.get(email=current_user_email)
-        if current_user is None:
-            redirect(url_for('register', user_email=current_user_email))
-        return func(*args, **kwargs)
-    return decorated_api
-'''
-
-'''
-@app.route('/')
-def index():
-    access_token = session.get('access_token')
-    if access_token is None:
-        return redirect(url_for('login'))
-
-    access_token = access_token[0]
-    from urllib2 import Request, urlopen, URLError
-
-    headers = {'Authorization': 'OAuth '+access_token}
-    req = Request('https://www.googleapis.com/oauth2/v1/userinfo',
-                  None, headers)
-    try:
-        res = urlopen(req)
-    except URLError, e:
-        if e.code == 401:
-            # Unauthorized - bad token
-            session.pop('access_token', None)
-            return redirect(url_for('login'))
-        return res.read()
-
-    return res.read()
-'''
 if __name__ == '__main__':
     app.run()
