@@ -11,7 +11,7 @@ db = MongoEngine()
 
 login_manager = LoginManager()
 login_manager.session_protection = 'basic'
-login_manager.login_view = 'accounts.login'
+login_manager.login_view = 'api.login'
 
 principals = Principal()
 

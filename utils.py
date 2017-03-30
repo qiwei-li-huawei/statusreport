@@ -23,10 +23,9 @@ def get_request_data():
 
 def make_json_response(status_code, data):
     """Wrap json format to the reponse object."""
-    with open('/tmp/debug', 'w+') as f:
-        f.write(str(data))
+    #with open('/tmp/debug', 'w+') as f:
+     #   f.write(str(data))
     result = json.dumps(data)
-    print(result)
     resp = make_response(result, status_code)
     resp.headers['Content-type'] = 'application/json'
 

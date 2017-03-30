@@ -13,7 +13,7 @@ ROLES = (('admin', 'admin'),
 class User(UserMixin, db.Document):
     username = db.StringField(max_length=255, required=True)
     email = db.EmailField(max_length=255)
-    password = db.StringField(required=True)
+    password_hash = db.StringField(required=True)
     create_time = db.DateTimeField(default=datetime.now, required=True)
     last_login = db.DateTimeField(default=datetime.now, required=True)
     is_superuser = db.BooleanField(default=False)
@@ -64,6 +64,7 @@ class Task(db.Document):
     status = db.StringField(max_length=64, default='todo', choices=STATUS_CHOICES)
     tags = db.ListField(db.StringField(max_length=30))
 
+    '''
     def save(self, allow_set_time=False, *args, **kwargs):
         if not allow_set_time:
             now = datetime.datetime.now()
@@ -76,14 +77,15 @@ class Task(db.Document):
         self.pub_time = pub_time
         self.update_time = update_time
         return self.save(allow_set_time=True)
+    '''
 
     def to_dict(self):
         task_dict = {}
         task_dict['title'] = self.title
         task_dict['abstract'] = self.abstract
-        task_dict['pub_time'] = self.pub_time.strftime('%Y-%m-%d %H:%M:%S')
-        task_dict['update_time'] = self.update_time.strftime('%Y-%m-%d %H:%M:%S')
-        task_dict['due_time'] = self.due_time.strftime('%Y-%m-%d %H:%M:%S')
+        task_dict['pub_time'] = self.pub_time.isoformat()
+        task_dict['update_time'] = self.update_time.isoformat()
+        task_dict['due_time'] = self.due_time.isoformat()
         task_dict['content'] = self.content
         task_dict['manager'] = self.manager.username
         task_dict['assignee'] = [assign_user.username for assign_user in self.assignee]
@@ -113,3 +115,11 @@ class Comment(db.Document):
     meta = {
         'ordering': ['-pub_time']
     }
+
+@login_manager.user_loader
+def load_user(username):
+    try:
+        user = User.objects.get(username=username)
+    except User.DoesNotExist:
+        user = None
+    return user

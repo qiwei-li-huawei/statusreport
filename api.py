@@ -1,5 +1,7 @@
 import functools
-import datetime
+import simplejson as json
+import ast
+from datetime import datetime
 
 from flask import Flask, redirect, url_for, session, jsonify, current_app, make_response
 from flask_oauth import OAuth
@@ -10,6 +12,7 @@ from flask_principal import Identity, AnonymousIdentity, identity_changed
 from app import app
 import models
 import utils
+import exception_handler
 from config import *
 
 oauth = OAuth()
@@ -28,6 +31,10 @@ google = oauth.remote_app('google',
 
 @app.route('/', methods=['GET'])
 def hello_world():
+    user = current_user
+    print(user)
+    print(models.User.objects.get(username="qiwei.li"))
+    print(datetime.datetime.now())
     return "hello_world"
 
 def _get_current_user():
@@ -41,26 +48,47 @@ def login_google():
     return google.authorize(callback=callback)
 
 
-def authorized():
-    resp = google.authorized_response()
-    if resp is None:
-        return redirect(url_for('accounts.login'))
-    session['google_token'] = (resp['access_token'], '')
-    user_info = google.get('userinfo')
+@app.route('/authorized')
+@google.authorized_handler
+def authorized(resp):
+    access_token = resp['access_token']
+
+    ### login with google failed
+    if access_token is None:
+        raise exception_handler.Unauthorized("failed login with google, please retry")
+        #return redirect(url_for('/login'))
+
+    session['access_token'] = access_token, ''
+    
+    from urllib2 import Request, urlopen, URLError
+
+    headers = {'Authorization': 'OAuth '+access_token}
+    req = Request('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', None, headers)
+
     try:
-        user = models.User.objects.get(email=user_info.data['email'])
-    except models.User.DoesNotExist:
-        user = None
+        res = urlopen(req)
+    except URLError, e:
+        if e.code == 401:
+            session.pop('access_token', None)
+            return redirect(url_for('login'))
+        return redirect(url_for('login'))
 
-    if user is None:
-        return redirect(url_for('register'))
 
-    login_user(user)
-    user.last_login = datetime.datetime.now
-    user.save()
-    identity_changed.send(current_app._get_current_object(), identity=Identity(user.username))
-    return redirect(request.args.get('next') or url_for('index'))
+    current_user_email = json.loads(str(res.read()))["email"]
+    google_user = models.User.objects.get(email=current_user_email)
+    if google_user is None:
+        raise exception_handler.Unauthorized("user not exist, please register")
+        #redirect(url_for('register'))
 
+    login_user(google_user, True, True)
+    google_user.last_login = datetime.datetime.now()
+    google_user.save()
+
+    identity_changed.send(current_app._get_current_object(), identity=Identity(google_user.username))
+    return utils.make_json_response(
+        200,
+        google_user.to_dict()
+        )
 
 @google.tokengetter
 def get_access_token():
@@ -71,30 +99,34 @@ def get_access_token():
 def login():
     data = utils.get_request_data()
     try:
-        user = models.User.objects.get(username=data.username)
+        user = models.User.objects.get(username=data["username"])
     except models.User.DoesNotExist:
         user = None
 
-    if not user or not user.verify_password(data.password):
-        raise exception_handler.Unauthorized()
+    if not user or not user.verify_password(data["password"]):
+        raise exception_handler.Unauthorized("username or password does not match")
 
-    login_user(user, data.remember_me)
-    user.last_login = datetime.datetime.now
+    success = login_user(user, data["remember_me"], True)
+    user.last_login = datetime.datetime.now()
     user.save()
+
     identity_changed.send(current_app._get_current_object(), identity=Identity(user.username))
     return utils.make_json_response(
         200,
         user.to_dict()
         )
 
+
 @app.route('/api/logout', methods=['POST'])
 @login_required
 def logout():
-    user = _get_current_user()
+    user = models.User.objects.get(username=current_user.username)
+
     logout_user()
+
     for key in ('identity.name', 'identity.auth_type'):
         session.pop(key, None)
-
+    
     identity_changed.send(current_app._get_current_object(), identity=AnonymousIdentity())
     return utils.make_json_response(
         200,
@@ -105,23 +137,15 @@ def logout():
 @app.route('/api/register', methods=['POST'])
 def register():
     data = utils.get_request_data()
-    
-    try:
-        exist_user1 = models.User.objects.get(username=data.username)
-    except models.User.DoesNotExist:
-        exist_user1 = None
 
-    try:
-        exist_user2 = models.User.objects.get(username=data.email)
-    except models.User.DoesNotExist:
-        exist_user2 = None
-
-    if exist_user1 is not None or exist_user2 is not None:
+    if (models.User.objects.filter(username=data["username"]).count() > 0 or 
+    models.User.objects.filter(email=data["email"]).count() > 0):
         raise exception_handler.BadRequest("user already exist")
     
     user = models.User()
     user.username = data['username']
     user.email = data['email']
+    user.password = data['password']
     user.save()
 
     return utils.make_json_response(
@@ -133,8 +157,10 @@ def register():
 @login_required
 def list_tasks():
     tasks = models.Task.objects.order_by('-due_time')
+    print(tasks)
 
-    cur_status = request.args.get('status')
+    cur_status = dict(request.args)['status']
+    print(cur_status)
     if cur_status:
         tasks = tasks.filter(status=cur_status)
 
@@ -151,6 +177,10 @@ def list_tasks():
 @login_required
 def get_task(tasktitle):
     task = models.Task.objects.get(title=tasktitle)
+    if task is None:
+        raise exception_handler.ItemNotFound(
+            "task %s not exist" % tasktitle
+            )
 
     return utils.make_json_response(
         200,
@@ -163,25 +193,28 @@ def create_task():
     data = utils.get_request_data()
 
     task = models.Task()
+
     task.title = data['title']
     task.content = data['content']
     task.manager = models.User.objects.get(username=data['manager'])
     for assign in data['assignee']:
-        task.assignee.append(models.User.objects.get(username=data['assign']))
+        task.assignee.append(models.User.objects.get(username=assign))
     task.status = data['status']
     task.tags = data['tags']
-    task.due_time = data['due_time']
-    task.set_task_date(datetime.now(), datetime.now())
+    task.due_time = datetime.datetime.strptime(data['due_time'], '%b %d %Y %I:%M%p')
+    task.pub_time = datetime.datetime.now()
+    task.update_time = datetime.datetime.now()
+
     if task.pub_time < task.due_time:
         task.save()
         return utils.make_json_response(
             200,
-            data
+            task.to_dict()
             )
     else:
         raise exception_handler.BadRequest(
             'due time %s is earlier than pub time %s' % (
-                    data['due_time'], datetime.now()
+                    data['due_time'], datetime.datetime.now()
                 )
             )
 
